@@ -17,12 +17,61 @@ const server = http.createServer(app);
 const wsServer = new WebSocket.Server({ noServer: true });
 const PORT = process.env.PORT || 3000;
 
+// function to  count students  whoul have taken the atendance in given class
+async function getAttendanceStudentCount(classId) {
+  const attendanceCount = await Attendance.aggregate([
+    {
+      $match: {
+        classId: new mongoose.Types.ObjectId(classId),
+      },
+    },
+    {
+      $unwind: "$stats",
+    },
+    {
+      $group: {
+        _id: null,
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  return attendanceCount.length > 0 ? attendanceCount[0].count : 0;
+}
+
+// function to get number of attendance itaken in a class
+async function getAttendanceCount(classId) {
+  const attendanceRecords = await Attendance.find({
+    classId: new mongoose.Types.ObjectId(classId),
+  });
+
+  // Create a set to store unique dates
+  const uniqueDates = new Set();
+
+  // Iterate over each attendance record
+  attendanceRecords.forEach((record) => {
+    // Iterate over each stat in the stats array
+    record.stats.forEach((stat) => {
+      // Convert date to YYYY-MM-DD format
+      const date = stat.date.toISOString().split("T")[0];
+
+      // Add date to the set
+      uniqueDates.add(date);
+    });
+  });
+
+  // The size of the set is the count of unique dates
+  const uniqueDateCount = uniqueDates.size;
+
+  return uniqueDateCount;
+}
+
 // "mongodb://127.0.0.1:27017/test"
 mongoose
 .connect(process.env.URI ||
   "mongodb+srv://najadams:90m8qgUYSID8YXP4@cluster0.xexrmso.mongodb.net/?retryWrites=true&w=majority"
   )
-.then(() => console.log("Successfully connected to MongoDB"))
+  .then(() => console.log("Successfully connected to MongoDB"))
   .catch((err) => console.error("Failed to connect to MongoDB:", err));
 
 const db = mongoose.connection;
@@ -88,15 +137,8 @@ app.post("/register/lecturer", async (req, res) => {
       lastname,
       referenceId,
       password: hashedPassword,
+      classes: [],
     });
-
-    // Create a new class associated with the lecturer
-    // const newClass = await Class.create({
-    //   name: `${firstname}_${referenceId}_Class`,
-    //   lecturerId: createdLecturer._id,
-    //   students: [], // Initialize with an empty array for students
-    //   attendance: [], // Initialize with an empty array for attendance
-    // });
 
     res.status(201).json({ message: "User registered successfully" });
   } catch (error) {
@@ -227,7 +269,7 @@ app.post("/createMongoCollection", async (req, res) => {
 app.post("/lecturer/classes", async (req, res) => {
   try {
     const lecturerId = req.body.lecturerId;
-    const data = await Class.find({ lecturerId }).populate("students");
+    const data = await Class.find({ lecturerId }, { students: false });
 
     res.status(200).json({ data });
   } catch (error) {
@@ -579,18 +621,129 @@ app.get("/attendance/:classId/:date", async (req, res) => {
 
     //  extract their first name and last name
     const studentNames = students.map((s) => {
-      const fullname = `${s.firstname} ${s.lastname}`
+      const fullname = `${s.firstname} ${s.lastname}`;
       return {
         _id: s.studentId,
         name: fullname,
-        status : 'Present'
+        status: "Present",
       };
-      
     });
 
     res.json(studentNames);
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+// get summary of students attendance
+app.get("/attendance/:studentId/:month", async (req, res) => {
+  try {
+    const { studentId, month } = req.params;
+    const currentYear = new Date().getFullYear();
+    const startDate = new Date(currentYear, month - 1, 1);
+    const endDate = new Date(currentYear, month, 1);
+
+    const attendance = await Attendance.find({
+      studentId: mongoose.Types.ObjectId(studentId),
+      "stats.date": {
+        $gte: startDate,
+        $lt: endDate,
+      },
+    });
+
+    const summary = attendance.reduce((acc, record) => {
+      record.stats.forEach((stat) => {
+        if (stat.date >= startDate && stat.date < endDate) {
+          acc[stat.status] = (acc[stat.status] || 0) + 1;
+        }
+      });
+      return acc;
+    }, {});
+
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// get summary of one (a particular) lecturer classes
+app.get("/lecturer/:lecturerId/summary", async (req, res) => {
+  try {
+    const { lecturerId } = req.params;
+
+    // Find all classes taught by the lecturer
+    const classes = await Class.find({
+      lecturerId: new mongoose.Types.ObjectId(lecturerId),
+    });
+
+    // Prepare the summary
+    const summary = await Promise.all(
+      classes.map(async (classItem) => {
+        // Count the number of students in the class
+        const studentCount = classItem.students.length;
+
+        // Count the number of attendance records for the class
+        const attendanceCount = await getAttendanceCount(classItem._id);
+
+        return {
+          className: classItem.name,
+          studentCount,
+          attendanceCount,
+        };
+      })
+    );
+
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// endpoint that returns all students with attendance less than a given number
+app.get("/missed/:lecturerId/:name/:number", async (req, res) => {
+  try {
+    const { lecturerId, name, number } = req.params;
+    const maxAttendance = Number(number);
+
+    // Fetch class details
+    const classDetail = await Class.findOne({ name, lecturerId });
+    if (!classDetail) {
+      return res.status(404).json({ error: "Class not found" });
+    }
+
+    const classId = classDetail._id;
+
+    // Fetch all attendances for the class
+    const attendances = await Attendance.find({ classId });
+
+    // Count attendances for each student
+    const attendanceCounts = {};
+    attendances.forEach((attendance) => {
+      attendanceCounts[attendance.studentId] =
+        (attendanceCounts[attendance.studentId] || 0) + 1;
+    });
+
+    // Find students with attendance count less than maxAttendance
+    const missedStudents = [];
+    for (const studentId of classDetail.students) {
+      const attendanceCount = attendanceCounts[studentId] || 0;
+      if (attendanceCount < maxAttendance) {
+        missedStudents.push(studentId);
+      }
+    }
+
+    // Fetch the student data
+    const students = await Student.find({ _id: { $in: missedStudents } });
+
+    const data = students.map((student) => ({
+      id: student._id,
+      name: `${student.firstname} ${student.lastname}`,
+    }));
+
+    res.json(data);
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 

@@ -5,6 +5,7 @@ const lecturerSchema = new mongoose.Schema({
   lastname: { type: String, required: true },
   referenceId: { type: String, required: true, unique: true },
   password: { type: String, required: true },
+  classes: [{type: mongoose.Schema.Types.ObjectId, ref: "Classes"}],
   lecturerLocation: {
     longitude: { type: Number, required: false },
     latitude: { type: Number, required: false },
@@ -21,7 +22,6 @@ const classSchema = new mongoose.Schema({
     required: true,
   },
   students: [{ type: mongoose.Schema.Types.ObjectId, ref: "Student" }],
-  attendance: [{ type: mongoose.Schema.Types.ObjectId, ref: "Attendance" }],
   attendancePortalStatus: {
     type: String,
     enum: ["open", "closed"],
@@ -58,7 +58,7 @@ const attendanceSchema = new mongoose.Schema({
   classId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Class",
-    required: true,
+    required: true, 
     index: true,
   },
   stats: [
